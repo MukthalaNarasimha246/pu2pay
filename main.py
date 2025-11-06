@@ -1,13 +1,14 @@
 from datetime import datetime
 import shutil
 # from urllib.request import Request
-from get_db_name_from_token import get_db_name_from_token, get_psycopg2_connection
+from get_db_name_from_token import get_db_name_from_token, get_db_name_from_token_role_based, get_psycopg2_connection
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
+from typing import Optional
 
 
 from PIL import Image
-from fastapi import FastAPI, File, HTTPException, Body, UploadFile, Request
+from fastapi import FastAPI, File, HTTPException, Body, UploadFile, Request,Query
 from typing import List, Dict
 from fastapi.staticfiles import StaticFiles
 import psycopg2
@@ -796,7 +797,7 @@ async def get_pdf_conversion_data(request: Request):
     conn = get_psycopg2_connection(db_name)
     cursor = conn.cursor()
     try:
-        query = "SELECT * FROM pdf_conversion_hypotus;"
+        query = "SELECT * FROM pdf_conversion_hypotus ORDER BY created_at DESC;"
         cursor.execute(query)
         records = cursor.fetchall()
         colnames = [desc[0] for desc in cursor.description]
@@ -816,7 +817,7 @@ async def get_classification_details_table_data(request: Request):
     conn = get_psycopg2_connection(db_name)
     cursor = conn.cursor()
     try:
-        query = "SELECT * FROM image_classification_hypotus;"
+        query = "SELECT * FROM image_classification_hypotus ORDER BY created_at DESC;"
         cursor.execute(query)
         records = cursor.fetchall()
         # print("records", records)
@@ -1273,9 +1274,14 @@ def get_combined_summary(invoice_id: int,request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/image_duplicates/{id}")
-def image_duplicates(id: str, request: Request):
+def image_duplicates(id: str, request: Request,token: str = Query(None)):
     try:
-        db_name = get_db_name_from_token(request)
+        print(token,'uytutyu')
+        # ✅ Use query param token if provided, else read from header
+        if token:
+            db_name = get_db_name_from_token_role_based(token)
+        else:
+            db_name = get_db_name_from_token(request)
         conn = get_psycopg2_connection(db_name)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -1293,6 +1299,9 @@ def image_duplicates(id: str, request: Request):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    
+
+
 @app.get("/invoice_po_mrn_number/{id}")
 def invoice_po_mrn_number(id: str, request: Request):
     try:
@@ -1551,14 +1560,149 @@ def update_po_ref(data: UpdatePORefRequest,request: Request):
 
 
 
-# @app.get("/image/")
-# def get_image(file_path: str):
-#     # Validate if file exists
-#     if os.path.exists(file_path):
-#         return FileResponse(file_path, media_type="image/png")
-#     return {"error": "File not found"}
 
 
+
+
+class ImageReview(BaseModel):
+    reference_image: str
+    remarks: str
+    review_status: bool
+    pdf_ref_id:int
+    token: Optional[str] = None 
+    
+
+
+
+@app.post("/image_duplicates/review")
+def review_image_duplicate(payload: ImageReview, request: Request):
+    try:
+        if payload.token:
+            db_name = get_db_name_from_token_role_based(payload.token)
+        else:
+            db_name = get_db_name_from_token(request)
+
+
+
+
+        conn = get_psycopg2_connection(db_name)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # ✅ Update pdf_conversion_hypotus by ID
+        update_pdf_query = """
+            UPDATE pdf_conversion_hypotus
+            SET review_status = %s
+            WHERE id = %s
+            RETURNING *;
+        """
+
+        # ✅ Update image_duplicates by reference_image
+        update_dup_query = """
+            UPDATE image_duplicates
+            SET review_status = %s,
+                review_remark = %s
+            WHERE reference_image = %s
+            RETURNING *;
+        """
+
+        # Execute main update
+        cur.execute(update_pdf_query, (
+            payload.review_status, 
+            payload.pdf_ref_id  # ✅ Correct column
+        ))
+        updated_pdf = cur.fetchone()
+
+        # Execute duplicate update
+        cur.execute(update_dup_query, (
+            payload.review_status, 
+            payload.remarks, 
+            payload.reference_image
+        ))
+        updated_dup = cur.fetchone()
+
+        if not updated_pdf:
+            raise HTTPException(status_code=404, detail="No PDF record found for given id")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {
+            "message": "Review status updated successfully",
+            "pdf_record": updated_pdf,
+            "duplicate_record": updated_dup
+        }
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+
+
+@app.get("/get_conversion_details_id")
+async def get_pdf_conversion_data(claim_id: str, token: str):
+    try:
+        # Get DB Name using token passed in query
+        db_name = get_db_name_from_token_role_based(token)
+        print("DB Name:", db_name)
+
+        conn = get_psycopg2_connection(db_name)
+        cursor = conn.cursor()
+
+        query = """
+            SELECT * FROM pdf_conversion_hypotus 
+            WHERE claim_id = %s
+            ORDER BY created_at DESC;
+        """
+        cursor.execute(query, (claim_id,))
+
+        records = cursor.fetchall()
+        colnames = [desc[0] for desc in cursor.description]
+        result = [dict(zip(colnames, row)) for row in records]
+        result  = [item for item in records if item.get("num_pdfs") == 4444]
+        return records
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving pdf conversion data: {str(e)}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.get("/classification_details_id")
+async def get_classification_details_table_data(claim_id: str, token: str):
+    try:
+        # Get DB name from token
+        db_name = get_db_name_from_token_role_based(token)
+        print("DB Name:", db_name)
+
+        conn = get_psycopg2_connection(db_name)
+        cursor = conn.cursor()
+
+        query = """
+            SELECT * FROM image_classification_hypotus
+            WHERE claim_id = %s
+            ORDER BY created_at DESC;
+        """
+        cursor.execute(query, (claim_id,))
+
+        records = cursor.fetchall()
+        colnames = [desc[0] for desc in cursor.description]
+        result = [dict(zip(colnames, row)) for row in records]
+
+        return records
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving image_classification data: {str(e)}"
+        )
+    
+    finally:
+        cursor.close()
+        conn.close()    
 
 from pathlib import Path
 
