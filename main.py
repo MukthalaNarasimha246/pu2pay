@@ -1,6 +1,8 @@
 from datetime import datetime
 import shutil
 from get_db_name_from_token import get_db_name_from_token, get_psycopg2_connection,get_db_name_from_token_role_based
+# from urllib.request import Request
+from get_db_name_from_token import get_db_name_from_token, get_db_name_from_token_role_based, get_psycopg2_connection
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 from PIL import Image
@@ -1306,6 +1308,9 @@ def image_duplicates(id: str, request: Request,token:str = Query(None)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    
+
+
 @app.get("/invoice_po_mrn_number/{id}")
 def invoice_po_mrn_number(id: str, request: Request):
     try:

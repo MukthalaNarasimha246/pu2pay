@@ -25,6 +25,22 @@ def get_db_name_from_token(request: Request) -> str:
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
+
+
+# ✅ Extract db_name from JWT
+def get_db_name_from_token_role_based(request):
+ 
+    
+    token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYl9uYW1lIjoiREIwMDE1In0.9Wdc8Pia65SGQLIpIwyGRml99hK5zy3S9mxzIZqFtWQ'
+    try:
+        payload = jwt.decode(request, SECRET_KEY, algorithms=[ALGORITHM])
+        db_name = payload.get("db_name")
+        if not db_name:
+            raise ValueError("Missing db_name in token")
+        return db_name
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+    
 # ✅ Use psycopg2 to connect dynamically
 def get_psycopg2_connection(db_name: str):
     try:
