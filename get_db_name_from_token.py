@@ -31,8 +31,8 @@ def get_psycopg2_connection(db_name: str):
         conn = psycopg2.connect(
             dbname=db_name,
             user="postgres",
-            password="postgres",
-            host="localhost",
+            password="root",
+            host="postgres-service",
             port="5432",
             cursor_factory=RealDictCursor  # ⬅️ Converts rows to dict automatically
         )
@@ -53,3 +53,18 @@ def get_psycopg2_connection(db_name: str):
 #         return rows  # Already list of dicts via RealDictCursor
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+# ✅ Extract db_name from JWT
+def get_db_name_from_token_role_based(request):
+ 
+   
+    token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYl9uYW1lIjoiREIwMDE1In0.9Wdc8Pia65SGQLIpIwyGRml99hK5zy3S9mxzIZqFtWQ'
+    try:
+        payload = jwt.decode(request, SECRET_KEY, algorithms=[ALGORITHM])
+        db_name = payload.get("db_name")
+        if not db_name:
+            raise ValueError("Missing db_name in token")
+        return db_name
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")

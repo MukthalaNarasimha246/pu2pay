@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pu2pay
+  labels:
+    app: pu2pay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pu2pay
+  template:
+    metadata:
+      labels:
+        app: pu2pay
+    spec:
+      nodeName: aks-gpupool01-11808407-vms1
+      containers:
+        - name: pu2pay-container
+          image: democonregistry-e2b8hrbegnarfnh7.azurecr.io/pu2pay:v3
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+          - configMapRef:
+              name: pu2pay-config

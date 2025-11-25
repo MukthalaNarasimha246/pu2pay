@@ -9,23 +9,14 @@ from difflib import SequenceMatcher
 from paddleocr import PaddleOCR
 from PIL import Image
 import imagehash
-
-
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.applications.resnet50 import preprocess_input
 from tensorflow.keras.models import Model
-
-
 from db import get_db_connection
 from text_to_json import Image_to_JSON
 
 # Initialize PaddleOCR
 ocr = PaddleOCR(use_angle_cls=True, lang='en')
-
-# Define paths
-IMAGE_DIR = "/Users/fis/Documents/pu2pay/output_convert_images"
-# IMAGE_DIR = "/Users/fis/Documents/pu2pay/invoices"
-
 
 # Helper to check if file is an image
 def is_image_file(file_path):
@@ -82,19 +73,14 @@ def detect_tampering(image_path):
 def compare_with_reference_image(reference_image_path, image_dir, insert_id,image_filename,db_name):
     reference_text = extract_text(reference_image_path)
     print("Reference text:", insert_id)
-    
-
     reference_hash = compute_image_hash(reference_image_path)
     reference_vector = compute_feature_vector(reference_image_path)
     reference_tampering_score = detect_tampering(reference_image_path)
 
     for file_name in os.listdir(image_dir):
         file_path = os.path.join(image_dir, file_name)
-        duplicate_file_path = os.path.join("/Users/fis/Documents/pu2pay/dublicate_output_images", file_name)
-        # duplicate_file_path = os.path.join("", file_name)
         if not os.path.isfile(file_path) or not is_image_file(file_path):
             continue
-
         try:
             target_text = extract_text(file_path)
             target_hash = compute_image_hash(file_path)

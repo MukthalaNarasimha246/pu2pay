@@ -1,35 +1,54 @@
 from datetime import datetime
 import shutil
-# from urllib.request import Request
-from get_db_name_from_token import get_db_name_from_token, get_psycopg2_connection
+from get_db_name_from_token import get_db_name_from_token, get_psycopg2_connection,get_db_name_from_token_role_based
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-
-
 from PIL import Image
-from fastapi import FastAPI, File, HTTPException, Body, UploadFile, Request
+from fastapi import FastAPI, File, HTTPException, Body, UploadFile, Request,Query
 from typing import List, Dict
 from fastapi.staticfiles import StaticFiles
 import psycopg2
+from typing import Optional
 import psycopg2.extras
 from fastapi.responses import FileResponse
-
-# from duplicate import compare_with_reference_image
-# from models import *
 import json
 import os
-# import torch
 from fastapi.responses import JSONResponse
-from fastapi import FastAPI, HTTPException, Body
-# from CRUD.invoice import insert_invoice
+from fastapi import Form, FastAPI, HTTPException, Body
 from db import get_db_connection
 from fastapi.middleware.cors import CORSMiddleware
-# from pdf2image import convert_from_path
 import uuid
 from rapidfuzz import process, fuzz
 import re
+from paddleocr import PaddleOCR
+from pathlib import Path
+import requests
+from PIL import Image, ImageDraw, ImageFont
+import io, json, numpy as np
+from pathlib import Path
 
+BASE_DIR = Path("/app/data")
+UPLOADS = BASE_DIR / "uploads"
 
+print("Imports completed.")
+ 
+# Suppress warnings from requests
+print("Suppressing requests warnings...")
+requests.packages.urllib3.disable_warnings()
+ 
+# Force all requests to skip SSL verification
+print("Overriding requests.Session.request to skip SSL verification...")
+original_request = requests.Session.request
+def unsafe_request(self, *args, **kwargs):
+    print("Intercepting a request, forcing verify=False")
+    kwargs['verify'] = False
+    return original_request(self, *args, **kwargs)
+requests.Session.request = unsafe_request
+ 
+# Initialize PaddleOCR
+print("Initializing PaddleOCR...")
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
+print("PaddleOCR initialized successfully.")
 
 app = FastAPI(title="PU2PAY API - Invoice, PO, MRN, RAO")
 
@@ -41,16 +60,6 @@ app.add_middleware(
     allow_methods=["*"],  # Allow specific methods like ["GET", "POST"]
     allow_headers=["*"],  # Allow specific headers
 )
-app.mount("/images", StaticFiles(directory="./output_convert_images"), name="images")
-app.mount("/images_duplicate", StaticFiles(directory="./dublicate_output_images"), name="images_duplicate")
-# device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-
-# Disable tokenizers parallelism warnings
-# os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-# # Load the LayoutLMv2 model and processor
-# model_path = '/Users/fis/Documents/claim_summerisation/LayoutLMv2_models/LayoutLMv2_06092024.h5'
-# class_names_path = '/Users/fis/Documents/claim_summerisation/LayoutLMv2_models/class_names.json'
 
 class FolderPathRequest(BaseModel):
     root_input: str
@@ -270,8 +279,8 @@ def get_psycopg2_connection(db_name: str):
         conn = psycopg2.connect(
             dbname=db_name,
             user="postgres",
-            password="postgres",
-            host="localhost",
+            password="root",
+            host="postgres-service",
             port="5432",
             cursor_factory=RealDictCursor  # ⬅️ Converts rows to dict automatically
         )
@@ -796,7 +805,7 @@ async def get_pdf_conversion_data(request: Request):
     conn = get_psycopg2_connection(db_name)
     cursor = conn.cursor()
     try:
-        query = "SELECT * FROM pdf_conversion_hypotus;"
+        query = "SELECT * FROM pdf_conversion_hypotus ORDER BY created_at DESC;"
         cursor.execute(query)
         records = cursor.fetchall()
         colnames = [desc[0] for desc in cursor.description]
@@ -816,7 +825,7 @@ async def get_classification_details_table_data(request: Request):
     conn = get_psycopg2_connection(db_name)
     cursor = conn.cursor()
     try:
-        query = "SELECT * FROM image_classification_hypotus;"
+        query = "SELECT * FROM image_classification_hypotus ORDER BY created_at DESC;"
         cursor.execute(query)
         records = cursor.fetchall()
         # print("records", records)
@@ -1273,9 +1282,13 @@ def get_combined_summary(invoice_id: int,request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/image_duplicates/{id}")
-def image_duplicates(id: str, request: Request):
+def image_duplicates(id: str, request: Request,token:str = Query(None)):
     try:
-        db_name = get_db_name_from_token(request)
+        print(token,'token')
+        if token:
+            db_name = get_db_name_from_token_role_based(token)
+        else:
+            db_name = get_db_name_from_token(request)
         conn = get_psycopg2_connection(db_name)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -1559,8 +1572,168 @@ def update_po_ref(data: UpdatePORefRequest,request: Request):
 #     return {"error": "File not found"}
 
 
+class ImageReview(BaseModel):
+    reference_image: str
+    remarks: str
+    review_status: bool
+    pdf_ref_id:int
+    token: Optional[str] = None
+ 
+@app.post("/image_duplicates/review")
+def review_image_duplicate(payload: ImageReview, request: Request):
+    try:
+        if payload.token:
+            db_name = get_db_name_from_token_role_based(payload.token)
+        else:
+            db_name = get_db_name_from_token(request)
+ 
+        conn = get_psycopg2_connection(db_name)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+ 
+        # Step 1: Get existing status of pdf_conversion_hypotus
+        cur.execute("""
+            SELECT status
+            FROM pdf_conversion_hypotus
+            WHERE id = %s
+        """, (payload.pdf_ref_id,))
+        pdf_row = cur.fetchone()
+ 
+        if not pdf_row:
+            raise HTTPException(status_code=404, detail="No PDF record found for given id")
+ 
+        current_status = pdf_row["status"]
+ 
+        # STATUS SHOULD NOT BE UPDATED IF IT IS IN THESE BLOCKED STATES
+        blocked_statuses = ["Checklist Failed", "Reconciliation"]
+ 
+        # Step 2: Build dynamic query for pdf_conversion_hypotus
+        if current_status not in blocked_statuses:
+            # Allowed to update status
+            update_pdf_query = """
+                UPDATE pdf_conversion_hypotus
+                SET review_status = %s,
+                    status = 'Po No not mapped'
+                WHERE id = %s
+                RETURNING *;
+            """
+            cur.execute(update_pdf_query, (
+                payload.review_status,
+                payload.pdf_ref_id
+            ))
+        else:
+            # DO NOT UPDATE status
+            update_pdf_query = """
+                UPDATE pdf_conversion_hypotus
+                SET review_status = %s
+                WHERE id = %s
+                RETURNING *;
+            """
+            cur.execute(update_pdf_query, (
+                payload.review_status,
+                payload.pdf_ref_id
+            ))
+ 
+        updated_pdf = cur.fetchone()
+ 
+        # Step 3: Update image_duplicates
+        update_dup_query = """
+            UPDATE image_duplicates
+            SET review_status = %s,
+                review_remark = %s
+            WHERE reference_image = %s
+            RETURNING *;
+        """
+ 
+        cur.execute(update_dup_query, (
+            payload.review_status,
+            payload.remarks,
+            payload.reference_image
+        ))
+        updated_dup = cur.fetchone()
+ 
+        conn.commit()
+        cur.close()
+        conn.close()
+ 
+        return {
+            "message": "Review updated successfully",
+            "pdf_record": updated_pdf,
+            "duplicate_record": updated_dup
+        }
+ 
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))   
+ 
+ 
+ 
+@app.get("/get_conversion_details_id")
+async def get_pdf_conversion_data(claim_id: str, token: str):
+    try:
+        # Get DB Name using token passed in query
+        db_name = get_db_name_from_token_role_based(token)
+        print("DB Name:", db_name)
+ 
+        conn = get_psycopg2_connection(db_name)
+        cursor = conn.cursor()
+ 
+        query = """
+            SELECT * FROM pdf_conversion_hypotus
+            WHERE claim_id = %s
+            ORDER BY created_at DESC;
+        """
+        cursor.execute(query, (claim_id,))
+ 
+        records = cursor.fetchall()
+        colnames = [desc[0] for desc in cursor.description]
+        result = [dict(zip(colnames, row)) for row in records]
+        result  = [item for item in records if item.get("num_pdfs") == 4444]
+        return records
+ 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving pdf conversion data: {str(e)}")
+ 
+    finally:
+        cursor.close()
+        conn.close()
+ 
+ 
+@app.get("/classification_details_id")
+async def get_classification_details_table_data(claim_id: str, token: str):
+    try:
+        # Get DB name from token
+        db_name = get_db_name_from_token_role_based(token)
+        print("DB Name:", db_name)
+ 
+        conn = get_psycopg2_connection(db_name)
+        cursor = conn.cursor()
+ 
+        query = """
+            SELECT * FROM image_classification_hypotus
+            WHERE claim_id = %s
+            ORDER BY created_at DESC;
+        """
+        cursor.execute(query, (claim_id,))
+ 
+        records = cursor.fetchall()
+        colnames = [desc[0] for desc in cursor.description]
+        result = [dict(zip(colnames, row)) for row in records]
+ 
+        return records
+   
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error retrieving image_classification data: {str(e)}"
+        )
+   
+    finally:
+        cursor.close()
+        conn.close()    
 
-from pathlib import Path
+
+
+
 
 @app.get("/image/")
 def get_image(file_path: str):
@@ -1570,3 +1743,97 @@ def get_image(file_path: str):
         return FileResponse(path)
     return {"error": "File not found"}
    
+# --- Helper function to restore missing spaces ---
+def restore_spaces(text: str) -> str:
+    """Heuristic fix for OCR outputs missing spaces."""
+    if not text:
+        return text
+    text = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', text)  # lowercase → Uppercase
+    text = re.sub(r'(?<=[a-zA-Z])(?=[0-9])', ' ', text)  # letter → digit
+    text = re.sub(r'(?<=[0-9])(?=[a-zA-Z])', ' ', text)  # digit → letter
+    text = re.sub(r'([A-Z][a-z])', r' \1', text)  # capital followed by small letter
+    return text.strip()
+ 
+@app.post("/ocr")
+async def ocr_endpoint(image: UploadFile = File(...), rectangles: str = Form(...)):
+    image_data = await image.read()
+    boxes = json.loads(rectangles)
+ 
+    img = Image.open(io.BytesIO(image_data)).convert("RGB")
+    img_np = np.array(img)
+ 
+    results = []
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+ 
+    for box in boxes:
+        x1 = int(box['x'])
+        y1 = int(box['y'])
+        width = int(box['width'])
+        height = int(box['height'])
+ 
+        # Normalize negative width/height
+        if width < 0:
+            x1 += width
+            width = abs(width)
+        if height < 0:
+            y1 += height
+            height = abs(height)
+ 
+        x2 = x1 + width
+        y2 = y1 + height
+ 
+        # Add small padding to improve OCR space detection
+        padding = 5
+        x1 = max(0, x1 - padding)
+        y1 = max(0, y1 - padding)
+        x2 = min(img_np.shape[1], x2 + padding)
+        y2 = min(img_np.shape[0], y2 + padding)
+ 
+        # Clip coordinates to image bounds
+        x1 = max(0, min(x1, img_np.shape[1]-1))
+        y1 = max(0, min(y1, img_np.shape[0]-1))
+        x2 = max(0, min(x2, img_np.shape[1]))
+        y2 = max(0, min(y2, img_np.shape[0]))
+ 
+        if x2 <= x1 or y2 <= y1:
+            continue  # Skip invalid boxes
+ 
+        roi = img_np[y1:y2, x1:x2]
+        if roi.size == 0 or roi.shape[0] < 5 or roi.shape[1] < 5:
+            continue  # Skip too small regions
+ 
+        # Run OCR on the region
+        ocr_result = ocr.predict(roi)
+        print(ocr_result, 'ocr_result')
+ 
+        if ocr_result and isinstance(ocr_result, list) and 'rec_texts' in ocr_result[0]:
+            text = ocr_result[0]['rec_texts'][0] if ocr_result[0]['rec_texts'] else ""
+        else:
+            text = ""
+ 
+        # Apply post-processing to restore lost spaces
+        text = restore_spaces(text)
+ 
+        results.append({
+            "coordinates": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+            "text": text,
+            "color": box.get("color", "red"),
+            "label": box.get("label", "")
+        })
+ 
+        # Draw rectangle and text on image
+        draw.rectangle([x1, y1, x2, y2], outline=box.get("color", "red"), width=2)
+        draw.text((x1, y1 - 10), text, fill=box.get("color", "red"), font=font)
+ 
+    # Save processed image to folder
+    output_dir = "output_images"
+    os.makedirs(output_dir, exist_ok=True)
+ 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(output_dir, f"ocr_result_{timestamp}.png")
+ 
+    img.save(output_path)
+    print(f"✅ Image saved at: {output_path}")
+ 
+    return results

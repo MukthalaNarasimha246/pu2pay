@@ -1,13 +1,19 @@
 # Use official Python base image
-FROM python:3.11-slim
+FROM python:3.12.4-slim
 
 # Set working directory
 WORKDIR /app
 
 # Install system dependencies (optional: for things like psycopg2, Pillow, etc.)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libpq-dev \
+    python3-dev \
+    libgl1 \
+    libglib2.0-0 \
+    git \
+    curl \
+    libmupdf-dev \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install pipenv or requirements.txt dependencies
@@ -21,4 +27,4 @@ COPY . .
 EXPOSE 8000
 
 # Run app with uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8006"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
