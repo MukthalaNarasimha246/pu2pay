@@ -4,6 +4,11 @@ FROM python:3.12.4-slim
 # Set working directory
 WORKDIR /app
 
+
+
+
+
+
 # Install system dependencies (optional: for things like psycopg2, Pillow, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
